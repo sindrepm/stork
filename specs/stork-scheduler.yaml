@@ -29,7 +29,7 @@ rules:
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
-    resources: ["pods"]
+    resources: ["pods", "namespaces"]
     verbs: ["delete", "get", "list", "watch"]
   - apiGroups: [""]
     resources: ["bindings", "pods/binding"]
@@ -103,7 +103,7 @@ spec:
         - --leader-elect=true
         - --config=/etc/kubernetes/stork-config.yaml
         - --lock-object-name=stork-scheduler
-        image: gcr.io/google_containers/kube-scheduler-amd64:<kube_version>
+        image: k8s.gcr.io/kube-scheduler-amd64:<kube_version>
         livenessProbe:
           httpGet:
             path: /healthz
@@ -121,7 +121,7 @@ spec:
           privileged: false
         volumeMounts:
         - mountPath: /etc/kubernetes
-          name: scheduler-config          
+          name: scheduler-config
       affinity:
         podAntiAffinity:
           requiredDuringSchedulingIgnoredDuringExecution:
@@ -138,4 +138,4 @@ spec:
       - configMap:
           defaultMode: 420
           name: stork-config
-        name: scheduler-config      
+        name: scheduler-config
