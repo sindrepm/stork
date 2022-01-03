@@ -113,6 +113,31 @@ func IsJobPending(j *batchv1.Job) bool {
 	return false
 }
 
+// JobNodeExists checks if the node associated with the job spec exists in the cluster
+func JobNodeExists(j *batchv1.Job) error {
+	// Get the node name from job spec.
+	nodeName := j.Spec.Template.Spec.NodeName
+	if len(nodeName) > 0 {
+		nodes, err := core.Instance().GetNodes()
+		if err != nil {
+			logrus.Errorf("getting all nodes failed with error: %v", err)
+			// Not returning the error, so that the job does not get marked as failed in case of flaky errors
+			return nil
+		}
+		found := false
+		for _, node := range nodes.Items {
+			if node.Name == nodeName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("node %s does not exist anymore", nodeName)
+		}
+	}
+	return nil
+}
+
 // FetchJobContainerRestartCount fetches job pod restart count
 func FetchJobContainerRestartCount(j *batchv1.Job) (int32, error) {
 	// Check if the pod is in running state
@@ -166,10 +191,10 @@ func ToJobStatus(progress float64, errMsg string, jobStatus batchv1.JobCondition
 
 // GetConfigValue read configmap and return the value of the requested parameter
 // If error in reading from configmap, we try reading from env variable
-func GetConfigValue(key string) string {
+func GetConfigValue(cm, ns, key string) string {
 	configMap, err := core.Instance().GetConfigMap(
-		kdmpConfig,
-		defaultPXNamespace,
+		cm,
+		ns,
 	)
 	if err != nil {
 		logrus.Warnf("Failed in getting value for key [%v] from configmap[%v]", key, kdmpConfig)
@@ -194,8 +219,8 @@ func ResticExecutorImageSecret() string {
 }
 
 // KopiaExecutorImage returns a docker image that contains kopiaexecutor binary.
-func KopiaExecutorImage() string {
-	if customImage := strings.TrimSpace(GetConfigValue(drivers.KopiaExecutorImageKey)); customImage != "" {
+func KopiaExecutorImage(configMap, ns string) string {
+	if customImage := strings.TrimSpace(GetConfigValue(configMap, ns, drivers.KopiaExecutorImageKey)); customImage != "" {
 		return customImage
 	}
 	// use a versioned docker image
@@ -203,8 +228,8 @@ func KopiaExecutorImage() string {
 }
 
 // KopiaExecutorImageSecret returns an image pull secret for the resticexecutor image.
-func KopiaExecutorImageSecret() string {
-	return strings.TrimSpace(GetConfigValue(drivers.KopiaExecutorImageSecretKey))
+func KopiaExecutorImageSecret(configMap, ns string) string {
+	return strings.TrimSpace(GetConfigValue(configMap, ns, drivers.KopiaExecutorImageSecretKey))
 }
 
 // RsyncImage returns a docker image that contains rsync binary.
@@ -244,23 +269,27 @@ func ToImagePullSecret(name string) []corev1.LocalObjectReference {
 }
 
 // KopiaResourceRequirements returns ResourceRequirements for the kopiaexecutor container.
-func KopiaResourceRequirements() (corev1.ResourceRequirements, error) {
-	requestCPU := drivers.DefaultKopiaExecutorRequestCPU
-	if customRequestCPU := os.Getenv(drivers.KopiaExecutorRequestCPU); customRequestCPU != "" {
-		requestCPU = customRequestCPU
+func KopiaResourceRequirements(configMap, ns string) (corev1.ResourceRequirements, error) {
+	requestCPU := strings.TrimSpace(GetConfigValue(configMap, ns, drivers.KopiaExecutorRequestCPU))
+	if requestCPU == "" {
+		requestCPU = drivers.DefaultKopiaExecutorRequestCPU
 	}
-	requestMem := drivers.DefaultKopiaExecutorRequestMemory
-	if customRequestMemory := os.Getenv(drivers.KopiaExecutorRequestMemory); customRequestMemory != "" {
-		requestMem = customRequestMemory
+
+	requestMem := strings.TrimSpace(GetConfigValue(configMap, ns, drivers.KopiaExecutorRequestMemory))
+	if requestMem == "" {
+		requestMem = drivers.DefaultKopiaExecutorRequestMemory
 	}
-	limitCPU := drivers.DefaultKopiaExecutorLimitCPU
-	if customLimitCPU := os.Getenv(drivers.KopiaExecutorLimitCPU); customLimitCPU != "" {
-		limitCPU = customLimitCPU
+
+	limitCPU := strings.TrimSpace(GetConfigValue(configMap, ns, drivers.KopiaExecutorLimitCPU))
+	if limitCPU == "" {
+		limitCPU = drivers.DefaultKopiaExecutorLimitCPU
 	}
-	limitMem := drivers.DefaultKopiaExecutorLimitMemory
-	if customLimitMemory := os.Getenv(drivers.KopiaExecutorLimitMemory); customLimitMemory != "" {
-		limitMem = customLimitMemory
+
+	limitMem := strings.TrimSpace(GetConfigValue(configMap, ns, drivers.KopiaExecutorLimitMemory))
+	if limitMem == "" {
+		limitMem = drivers.DefaultKopiaExecutorLimitMemory
 	}
+
 	return toResourceRequirements(requestCPU, requestMem, limitCPU, limitMem)
 }
 

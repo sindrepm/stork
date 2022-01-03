@@ -541,8 +541,11 @@ func (a *ApplicationCloneController) prepareResources(
 			objects,
 			nil,
 			namespaceMapping,
+			nil, // no support for storage class mapping
 			pvNameMappings,
-			clone.Spec.IncludeOptionalResourceTypes)
+			clone.Spec.IncludeOptionalResourceTypes,
+			nil,
+		)
 		if err != nil {
 			return nil, err
 		}

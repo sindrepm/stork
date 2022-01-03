@@ -112,6 +112,12 @@ func (d Driver) JobStatus(id string) (*drivers.JobStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+	err = utils.JobNodeExists(job)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to fetch the node info tied to the job %s/%s: %v", namespace, name, err)
+		logrus.Errorf("%s: %v", fn, errMsg)
+		return nil, fmt.Errorf(errMsg)
+	}
 	var jobStatus batchv1.JobConditionType
 	if len(job.Status.Conditions) != 0 {
 		jobStatus = job.Status.Conditions[0].Type
@@ -160,7 +166,7 @@ func jobFor(
 ) (*batchv1.Job, error) {
 	labels := addJobLabels(jobOption.Labels)
 
-	resources, err := utils.KopiaResourceRequirements()
+	resources, err := utils.KopiaResourceRequirements(jobOption.JobConfigMap, jobOption.JobConfigMapNs)
 	if err != nil {
 		return nil, err
 	}
@@ -207,12 +213,12 @@ func jobFor(
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyOnFailure,
-					ImagePullSecrets:   utils.ToImagePullSecret(utils.KopiaExecutorImageSecret()),
+					ImagePullSecrets:   utils.ToImagePullSecret(utils.KopiaExecutorImageSecret(jobOption.JobConfigMap, jobOption.JobConfigMapNs)),
 					ServiceAccountName: jobName,
 					Containers: []corev1.Container{
 						{
 							Name:            "kopiaexecutor",
-							Image:           utils.KopiaExecutorImage(),
+							Image:           utils.KopiaExecutorImage(jobOption.JobConfigMap, jobOption.JobConfigMapNs),
 							ImagePullPolicy: corev1.PullAlways,
 							Command: []string{
 								"/bin/sh",

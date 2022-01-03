@@ -203,6 +203,12 @@ func (d Driver) JobStatus(id string) (*drivers.JobStatus, error) {
 		jobStatus = job.Status.Conditions[0].Type
 
 	}
+	err = utils.JobNodeExists(job)
+	if err != nil {
+		errMsg := fmt.Sprintf("failed to fetch the node info tied to the job %s/%s: %v", namespace, name, err)
+		logrus.Errorf("%s: %v", fn, errMsg)
+		return nil, fmt.Errorf(errMsg)
+	}
 	jobErr, nodeErr := utils.IsJobOrNodeFailed(job)
 	var errMsg string
 	if jobErr {
@@ -291,12 +297,12 @@ func jobFor(
 				},
 				Spec: corev1.PodSpec{
 					RestartPolicy:      corev1.RestartPolicyOnFailure,
-					ImagePullSecrets:   utils.ToImagePullSecret(utils.KopiaExecutorImageSecret()),
+					ImagePullSecrets:   utils.ToImagePullSecret(utils.KopiaExecutorImageSecret(jobOption.JobConfigMap, jobOption.JobConfigMapNs)),
 					ServiceAccountName: jobName,
 					Containers: []corev1.Container{
 						{
 							Name:            "kopiaexecutor",
-							Image:           utils.KopiaExecutorImage(),
+							Image:           utils.KopiaExecutorImage(jobOption.JobConfigMap, jobOption.JobConfigMapNs),
 							ImagePullPolicy: corev1.PullAlways,
 							Command: []string{
 								"/bin/sh",
@@ -392,7 +398,7 @@ func addJobLabels(labels map[string]string) map[string]string {
 
 func buildJob(jobName string, jobOptions drivers.JobOpts) (*batchv1.Job, error) {
 	fn := "buildJob"
-	resources, err := utils.KopiaResourceRequirements()
+	resources, err := utils.KopiaResourceRequirements(jobOptions.JobConfigMap, jobOptions.JobConfigMapNs)
 	if err != nil {
 		return nil, err
 	}
@@ -438,6 +444,12 @@ func roleFor() *rbacv1.Role {
 				APIGroups: []string{"kdmp.portworx.com"},
 				Resources: []string{"volumebackups"},
 				Verbs:     []string{rbacv1.VerbAll},
+			},
+			{
+				APIGroups:     []string{"security.openshift.io"},
+				Resources:     []string{"securitycontextconstraints"},
+				ResourceNames: []string{"hostaccess"},
+				Verbs:         []string{"use"},
 			},
 		},
 	}

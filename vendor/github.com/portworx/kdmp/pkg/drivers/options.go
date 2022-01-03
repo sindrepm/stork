@@ -37,6 +37,11 @@ type JobOpts struct {
 	MaintenanceType             string
 	RepoPVCName                 string
 	Compression                 string
+	PodDataPath                 string
+	// JobConfigMap holds any config needs to be provided to job
+	// from the caller. Eg: executor image name, secret, etc..
+	JobConfigMap   string
+	JobConfigMapNs string
 }
 
 // WithBackupObjectName is job parameter.
@@ -317,6 +322,30 @@ func WithMaintenanceType(maintenanceType string) JobOption {
 func WithCompressionType(compressionType string) JobOption {
 	return func(opts *JobOpts) error {
 		opts.Compression = compressionType
+		return nil
+	}
+}
+
+// WithPodDatapathType is job parameter.
+func WithPodDatapathType(podDataPath string) JobOption {
+	return func(opts *JobOpts) error {
+		opts.PodDataPath = podDataPath
+		return nil
+	}
+}
+
+// WithJobConfigMap is job parameter.
+func WithJobConfigMap(jobConfigMap string) JobOption {
+	return func(opts *JobOpts) error {
+		opts.JobConfigMap = jobConfigMap
+		return nil
+	}
+}
+
+// WithJobConfigMapNs is job parameter.
+func WithJobConfigMapNs(jobConfigMapNs string) JobOption {
+	return func(opts *JobOpts) error {
+		opts.JobConfigMapNs = jobConfigMapNs
 		return nil
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/aquilax/truncate"
 	snapv1 "github.com/kubernetes-incubator/external-storage/snapshot/pkg/apis/crd/v1"
 	snapshotVolume "github.com/kubernetes-incubator/external-storage/snapshot/pkg/volume"
+	stork_driver "github.com/libopenstorage/stork/drivers"
 	storkvolume "github.com/libopenstorage/stork/drivers/volume"
 	storkapi "github.com/libopenstorage/stork/pkg/apis/stork/v1alpha1"
 	"github.com/libopenstorage/stork/pkg/errors"
@@ -91,15 +92,11 @@ const (
 	// provisioner name
 	pvProvisionedByAnnotation = "pv.kubernetes.io/provisioned-by"
 	pureCSIProvisioner        = "pure-csi"
-	vSphereCSIProvisioner     = "csi.vsphere.vmware.com"
-	efsCSIProvisioner         = "efs.csi.aws.com"
-	pureBackendParam          = "backend"
-	pureFileParam             = "file"
-	proxyEndpoint             = "proxy_endpoint"
 	bindCompletedKey          = "pv.kubernetes.io/bind-completed"
 	boundByControllerKey      = "pv.kubernetes.io/bound-by-controller"
 	storageClassKey           = "volume.beta.kubernetes.io/storage-class"
 	storageProvisioner        = "volume.beta.kubernetes.io/storage-provisioner"
+	storageNodeAnnotation     = "volume.kubernetes.io/selected-node"
 )
 
 var volumeAPICallBackoff = wait.Backoff{
@@ -180,35 +177,7 @@ func isCSISnapshotClassRequired(pvc *v1.PersistentVolumeClaim) bool {
 		// In the case errors, we will allow the kdmp controller csi steps to decide on snapshot support.
 		return true
 	}
-	// check if CSI volume
-	if pv.Spec.CSI != nil {
-		driverName := pv.Spec.CSI.Driver
-		// pure FB csi driver does not support snapshot
-		if driverName == pureCSIProvisioner {
-			if pv.Spec.CSI.VolumeAttributes[pureBackendParam] == pureFileParam {
-				return false
-			}
-		}
-		// vSphere or aws EFS  does not support snapshot
-		if driverName == vSphereCSIProvisioner || driverName == efsCSIProvisioner {
-			return false
-		}
-
-		// For now, we know only pso file and vsphere are CSI driver that does not support snapshot.
-		// So added check. For other we will try to create CSI snapshot and if it fails, we will take generic backup.
-		return true
-	}
-	// TODO: If storage class is not present, need to make volume inspect call to portworx and check.
-	storageClassName := k8shelper.GetPersistentVolumeClaimClass(pvc)
-	if storageClassName != "" {
-		storageClass, err := storage.Instance().GetStorageClass(storageClassName)
-		if err == nil {
-			if _, ok := storageClass.Parameters[proxyEndpoint]; ok {
-				return false
-			}
-		}
-	}
-	return true
+	return !storkvolume.IsCSIDriverWithoutSnapshotSupport(pv)
 }
 
 func (k *kdmp) StartBackup(backup *storkapi.ApplicationBackup,
@@ -273,7 +242,6 @@ func (k *kdmp) StartBackup(backup *storkapi.ApplicationBackup,
 		snapshotClassRequired := isCSISnapshotClassRequired(&pvc)
 		if snapshotClassRequired {
 			dataExport.Spec.SnapshotStorageClass = k.getSnapshotClassName(backup)
-			volumeInfo.VolumeSnapshot = k.getSnapshotClassName(backup)
 		}
 		_, err = kdmpShedOps.Instance().CreateDataExport(dataExport)
 		if err != nil {
@@ -323,7 +291,10 @@ func (k *kdmp) GetBackupStatus(backup *storkapi.ApplicationBackup) ([]*storkapi.
 				if len(dataExport.Status.VolumeSnapshot) == 0 {
 					vInfo.VolumeSnapshot = ""
 				} else {
-					vInfo.VolumeSnapshot = fmt.Sprintf("%s.%s", vInfo.VolumeSnapshot, dataExport.Status.VolumeSnapshot)
+					volumeSnapshot := k.getSnapshotClassName(backup)
+					if len(volumeSnapshot) > 0 {
+						vInfo.VolumeSnapshot = fmt.Sprintf("%s,%s", volumeSnapshot, dataExport.Status.VolumeSnapshot)
+					}
 				}
 			}
 		}
@@ -427,6 +398,8 @@ func deleteKdmpSnapshot(backup *storkapi.ApplicationBackup) (bool, error) {
 					drivers.WithSourcePVC(vInfo.PersistentVolumeClaim),
 					drivers.WithCredSecretName(secretName),
 					drivers.WithCredSecretNamespace(secretNamespace),
+					drivers.WithJobConfigMap(stork_driver.KdmpConfigmapName),
+					drivers.WithJobConfigMapNs(stork_driver.KdmpConfigmapNamespace),
 				)
 				if err != nil {
 					errMsg := fmt.Sprintf("failed to start kdmp snapshot delete job for snapshot [%v] for backup [%v]: %v",
@@ -544,12 +517,22 @@ func (k *kdmp) getRestorePVCs(
 			if val, ok := restore.Spec.StorageClassMapping[sc]; ok {
 				pvc.Spec.StorageClassName = &val
 			}
+			// If pvc storageClassName is empty, we want to pick up the
+			// default storageclass configured on the cluster.
+			// Default storage class will not selected, if the storageclass
+			// is empty. So setting it to nil.
+			if pvc.Spec.StorageClassName != nil {
+				if len(*pvc.Spec.StorageClassName) == 0 {
+					pvc.Spec.StorageClassName = nil
+				}
+			}
 			pvc.Spec.VolumeName = ""
 			if pvc.Annotations != nil {
 				delete(pvc.Annotations, bindCompletedKey)
 				delete(pvc.Annotations, boundByControllerKey)
 				delete(pvc.Annotations, storageClassKey)
 				delete(pvc.Annotations, storageProvisioner)
+				delete(pvc.Annotations, storageNodeAnnotation)
 				pvc.Annotations[KdmpAnnotation] = StorkAnnotation
 			}
 			o, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&pvc)
@@ -581,7 +564,6 @@ func (k *kdmp) StartRestore(
 		if err != nil {
 			return nil, err
 		}
-
 		val, ok := restore.Spec.NamespaceMapping[bkpvInfo.Namespace]
 		if !ok {
 			return nil, fmt.Errorf("restore namespace mapping not found: %s", bkpvInfo.Namespace)
@@ -911,8 +893,8 @@ func getVolumeSnapshotClassFromBackupVolumeInfo(bkvpInfo *storkapi.ApplicationBa
 	if bkvpInfo.VolumeSnapshot == "" {
 		return vsClass
 	}
-	subStrings := strings.Split(bkvpInfo.VolumeSnapshot, ".")
-	vsClass = strings.Join(subStrings[0:len(subStrings)-1], ".")
+	subStrings := strings.Split(bkvpInfo.VolumeSnapshot, ",")
+	vsClass = strings.Join(subStrings[0:len(subStrings)-1], ",")
 
 	return vsClass
 }
