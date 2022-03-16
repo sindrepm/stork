@@ -21,6 +21,7 @@ import (
 	"github.com/libopenstorage/stork/pkg/log"
 	"github.com/portworx/sched-ops/k8s/core"
 	"github.com/portworx/sched-ops/k8s/storage"
+	storkops "github.com/portworx/sched-ops/k8s/stork"
 	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -184,12 +185,17 @@ func isCsiProvisioner(provisioner string) bool {
 func (a *aws) StartBackup(backup *storkapi.ApplicationBackup,
 	pvcs []v1.PersistentVolumeClaim,
 ) ([]*storkapi.ApplicationBackupVolumeInfo, error) {
-	if a.client == nil {
-		if err := a.Init(nil); err != nil {
-			return nil, err
+	var client *ec2.EC2
+	// if backuplocation has creds wrt the cluster, need to use that
+	client = a.getAWSClientFromBackupLocation(backup.Spec.BackupLocation, backup.Namespace)
+	if client == nil {
+		if a.client == nil {
+			if err := a.Init(nil); err != nil {
+				return nil, err
+			}
+			client = a.client
 		}
 	}
-
 	volumeInfos := make([]*storkapi.ApplicationBackupVolumeInfo, 0)
 
 	for _, pvc := range pvcs {
@@ -216,7 +222,7 @@ func (a *aws) StartBackup(backup *storkapi.ApplicationBackup,
 			return nil, fmt.Errorf("AWS EBS info not found in PV %v", pvName)
 		}
 
-		ebsVolume, err := storkvolume.GetEBSVolume(ebsName, nil, a.client)
+		ebsVolume, err := storkvolume.GetEBSVolume(ebsName, nil, client)
 		if err != nil {
 			return nil, err
 		}
@@ -229,7 +235,7 @@ func (a *aws) StartBackup(backup *storkapi.ApplicationBackup,
 		tags[nameTag] = "stork-snapshot-" + volume
 
 		// First check if we've already created a snapshot for this volume
-		if snapshot, err := a.getEBSSnapshot("", tags); err == nil {
+		if snapshot, err := a.getEBSSnapshot("", tags, client); err == nil {
 			volumeInfo.BackupID = *snapshot.SnapshotId
 		} else {
 
@@ -264,7 +270,7 @@ func (a *aws) StartBackup(backup *storkapi.ApplicationBackup,
 			var snapshot *ec2.Snapshot
 			var snapErr error
 			err = wait.ExponentialBackoff(apiBackoff, func() (bool, error) {
-				snapshot, snapErr = a.client.CreateSnapshot(snapshotInput)
+				snapshot, snapErr = client.CreateSnapshot(snapshotInput)
 				if snapErr != nil {
 					if awsErr, ok := snapErr.(awserr.Error); ok {
 						if !isExponentialError(awsErr) {
@@ -293,7 +299,7 @@ func (a *aws) StartBackup(backup *storkapi.ApplicationBackup,
 	return volumeInfos, nil
 }
 
-func (a *aws) getEBSSnapshot(snapshotID string, filters map[string]string) (*ec2.Snapshot, error) {
+func (a *aws) getEBSSnapshot(snapshotID string, filters map[string]string, client *ec2.EC2) (*ec2.Snapshot, error) {
 	input := &ec2.DescribeSnapshotsInput{}
 	if snapshotID != "" {
 		input.SnapshotIds = []*string{&snapshotID}
@@ -326,9 +332,15 @@ func (a *aws) getFiltersFromMap(filters map[string]string) []*ec2.Filter {
 }
 
 func (a *aws) GetBackupStatus(backup *storkapi.ApplicationBackup) ([]*storkapi.ApplicationBackupVolumeInfo, error) {
-	if a.client == nil {
-		if err := a.Init(nil); err != nil {
-			return nil, err
+	var client *ec2.EC2
+	// if backuplocation has creds wrt the cluster, need to use that
+	client = a.getAWSClientFromBackupLocation(backup.Spec.BackupLocation, backup.Namespace)
+	if client == nil {
+		if a.client == nil {
+			if err := a.Init(nil); err != nil {
+				return nil, err
+			}
+			client = a.client
 		}
 	}
 
@@ -338,7 +350,7 @@ func (a *aws) GetBackupStatus(backup *storkapi.ApplicationBackup) ([]*storkapi.A
 		if vInfo.DriverName != storkvolume.AWSDriverName {
 			continue
 		}
-		snapshot, err := a.getEBSSnapshot(vInfo.BackupID, nil)
+		snapshot, err := a.getEBSSnapshot(vInfo.BackupID, nil, client)
 		if err != nil {
 			return nil, err
 		}
@@ -368,9 +380,15 @@ func (a *aws) CancelBackup(backup *storkapi.ApplicationBackup) error {
 }
 
 func (a *aws) DeleteBackup(backup *storkapi.ApplicationBackup) (bool, error) {
-	if a.client == nil {
-		if err := a.Init(nil); err != nil {
-			return true, err
+	var client *ec2.EC2
+	// if backuplocation has creds wrt the cluster, need to use that
+	client = a.getAWSClientFromBackupLocation(backup.Spec.BackupLocation, backup.Namespace)
+	if client == nil {
+		if a.client == nil {
+			if err := a.Init(nil); err != nil {
+				return true, err
+			}
+			client = a.client
 		}
 	}
 
@@ -425,9 +443,15 @@ func (a *aws) StartRestore(
 	volumeBackupInfos []*storkapi.ApplicationBackupVolumeInfo,
 	preRestoreObjects []runtime.Unstructured,
 ) ([]*storkapi.ApplicationRestoreVolumeInfo, error) {
-	if a.client == nil {
-		if err := a.Init(nil); err != nil {
-			return nil, err
+	var client *ec2.EC2
+	// if backuplocation has creds wrt the cluster, need to use that
+	client = a.getAWSClientFromBackupLocation(restore.Spec.BackupLocation, restore.Namespace)
+	if client == nil {
+		if a.client == nil {
+			if err := a.Init(nil); err != nil {
+				return nil, err
+			}
+			client = a.client
 		}
 	}
 
@@ -452,7 +476,7 @@ func (a *aws) StartRestore(
 			if len(backupVolumeInfo.Zones) == 0 {
 				return nil, fmt.Errorf("zone missing in backup for volume (%v) %v", backupVolumeInfo.Namespace, backupVolumeInfo.PersistentVolumeClaim)
 			}
-			ebsSnapshot, err := a.getEBSSnapshot(backupVolumeInfo.BackupID, nil)
+			ebsSnapshot, err := a.getEBSSnapshot(backupVolumeInfo.BackupID, nil, client)
 			if err != nil {
 				return nil, err
 			}
@@ -521,9 +545,15 @@ func (a *aws) CancelRestore(*storkapi.ApplicationRestore) error {
 }
 
 func (a *aws) GetRestoreStatus(restore *storkapi.ApplicationRestore) ([]*storkapi.ApplicationRestoreVolumeInfo, error) {
-	if a.client == nil {
-		if err := a.Init(nil); err != nil {
-			return nil, err
+	var client *ec2.EC2
+	// if backuplocation has creds wrt the cluster, need to use that
+	client = a.getAWSClientFromBackupLocation(restore.Spec.BackupLocation, restore.Namespace)
+	if client == nil {
+		if a.client == nil {
+			if err := a.Init(nil); err != nil {
+				return nil, err
+			}
+			client = a.client
 		}
 	}
 
@@ -610,6 +640,33 @@ func (a *aws) CleanupBackupResources(*storkapi.ApplicationBackup) error {
 // CleanupBackupResources for specified restore
 func (a *aws) CleanupRestoreResources(*storkapi.ApplicationRestore) error {
 	return nil
+}
+
+// getAWSClientFromBackupLocation will return a client object using creds referred in backuplocation
+func (a *aws) getAWSClientFromBackupLocation(backupLocationName, ns string) *ec2.EC2 {
+	var client *ec2.EC2
+	backupLocation, err := storkops.Instance().GetBackupLocation(backupLocationName, ns)
+	if err != nil {
+		logrus.Errorf("error getting backup location %s resource: %v", backupLocationName, err)
+		return nil
+	}
+	metadata, err := cloud.NewMetadata()
+	if err != nil {
+		logrus.Errorf("error creating metadata instance: %v", err)
+		return nil
+	}
+	if len(backupLocation.Cluster.SecretConfig) > 0 {
+		s, err := session.NewSession(&aws_sdk.Config{
+			Region:      aws_sdk.String(metadata.GetRegion()),
+			Credentials: credentials.NewStaticCredentials(backupLocation.Cluster.AWSClusterConfig.AccessKeyID, backupLocation.Cluster.AWSClusterConfig.SecretAccessKey, ""),
+		})
+		if err != nil {
+			logrus.Errorf("error creating aws client session for backuplocation %s: %v", backupLocationName, err)
+			return nil
+		}
+		client = ec2.New(s)
+	}
+	return client
 }
 
 func init() {
