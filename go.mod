@@ -1,4 +1,4 @@
-module github.com/libopenstorage/stork
+module github.com/libopenstorage/stork/v2
 
 go 1.15
 
